@@ -8,28 +8,6 @@ This lab tests a snapshot-based long-term backup pattern for **Azure Files NFS**
 
 Azure Files share snapshots are the capture point; they are not an independent copy outside the source storage account. The Blob recovery-point archive is the separate copy. Azure Backup does not currently support NFS shares, so this lab exercises snapshot lifecycle and export/restore directly. See [Microsoft Learn: Use Azure Files Share Snapshots](https://learn.microsoft.com/en-us/azure/storage/files/storage-snapshots-files?tabs=portal).
 
-## Current deployment
-
-| Setting | Value |
-|---|---|
-| Subscription | A customer-selected subscription supplied through local configuration |
-| Region | Southeast Asia (`southeastasia`) |
-| Resource group | A disposable, customer-selected lab resource group |
-| IaC | Terraform with local state in `infra/terraform.tfstate` (do not commit state or plan files) |
-| Source storage account | Premium `FileStorage`, classic NFS shares; name is supplied in local configuration |
-| Source test share | `nfsbackup-lab` — 128-GiB provisioned quota |
-| Restore test share | `nfsbackup-restore` — 128-GiB provisioned quota |
-| Destination storage account | HNS-enabled `StorageV2`, LRS; name is supplied in local configuration |
-| Destination container | `nfs-backup-points` — private |
-| Backup worker | Ubuntu 24.04, `Standard_D2s_v5` (name held in local configuration) |
-| Staging disk | 128-GiB Standard SSD (name held in local configuration) |
-| Current source test data | Approximately 10 GiB (10,737,418,240 bytes after resizing the synthetic filler) |
-| 10-GiB recovery point | A run-specific ID and snapshot timestamp were recorded during testing; specific values remain in local operational output |
-| Uploaded archive | 10,737,448,960 bytes; digest matched after download (digest omitted from this guide) |
-| Restore verification | `MANIFEST_COMPARE=PASS`; 12 entries, 10,737,418,242 manifest file bytes |
-| Destination retention | Lifecycle deletion after 30 days; **not** WORM/immutability |
-
-The lab was deployed additively. It does not reuse or modify the existing source/target accounts named in the parent [SingtelNFS README](../README.md).
 
 ## Environment prerequisite: worker access to the NFS share
 
@@ -39,7 +17,7 @@ This mount is **worker/environment setup, not the recurring backup operation**. 
 
 ## What each backup run does
 
-1. Create a **classic Azure Files share snapshot** through the Azure management plane using the worker's user-assigned managed identity and a lab-scoped custom role. Azure creates the point-in-time snapshot; the worker does not create snapshot data by making a directory.
+1. Create a **classic Azure Files share snapshot of the configured source share** through the Azure management plane. In a customer deployment, this is the customer's existing share; the backup solution does not recreate or modify the share's live file contents. The worker authenticates with its user-assigned managed identity, which must be granted customer-approved least-privilege permissions to create/list snapshots on that source account. Azure creates the point-in-time snapshot; the worker does not create snapshot data by making a directory. The lab's custom role is only a test implementation of that permission boundary.
 2. Use the snapshot timestamp to locate its new read-only virtual view under the worker's mounted source share `.snapshots` path, then read the snapshot contents from there.
 3. Generate a source manifest, then create a POSIX pax-format tar archive on the attached staging disk. The archive uses numeric UID/GID and records POSIX modes, timestamps, symlinks, and hardlinks.
 4. Upload `backup.tar`, `manifest.json`, `run.json`, and then `_SUCCESS.json` to `nfs-backup-points/recovery-points/<run-id>/` using AzCopy and the worker's managed identity. Each run uses a unique prefix; the script does not overwrite an existing archive path.
