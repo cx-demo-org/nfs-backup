@@ -1,0 +1,14 @@
+subscription_id        = "<your-subscription-id>"
+location               = "southeastasia"
+resource_group_name    = "<disposable-lab-resource-group>"
+admin_ssh_public_key   = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY"
+source_share_quota_gib = 128
+stage_disk_size_gib    = 128
+seed_total_gib         = 28
+retention_days         = 30
+vm_size                = "Standard_D2s_v5"
+
+tags = {
+  owner       = "replace-with-owner"
+  cost-center = "replace-with-cost-center"
+}

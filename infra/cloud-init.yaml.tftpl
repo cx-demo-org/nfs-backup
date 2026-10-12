@@ -1,0 +1,66 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - jq
+  - nfs-common
+  - python3
+  - tar
+  - coreutils
+  - grep
+write_files:
+  - path: /etc/nfs-backup/lab.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      export SUBSCRIPTION_ID=${subscription_id}
+      export RESOURCE_GROUP=${resource_group_name}
+      export SOURCE_ACCOUNT=${source_account_name}
+      export SOURCE_SHARE=${source_share_name}
+      export RESTORE_SHARE=${restore_share_name}
+      export DESTINATION_ACCOUNT=${destination_account_name}
+      export BLOB_CONTAINER=${destination_container}
+      export WORKER_CLIENT_ID=${worker_client_id}
+      export SEED_TOTAL_GIB=${seed_total_gib}
+      export SOURCE_MOUNT=/mnt/nfs-source
+      export RESTORE_MOUNT=/mnt/nfs-restore
+      export STAGE_MOUNT=/mnt/nfs-stage
+      export SCRIPT_DIR=/opt/nfs-backup
+  - path: /opt/nfs-backup/backup.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${backup_script_b64}
+  - path: /opt/nfs-backup/restore-test.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${restore_script_b64}
+  - path: /opt/nfs-backup/seed-test-data.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${seed_script_b64}
+  - path: /opt/nfs-backup/manifest.py
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${manifest_script_b64}
+  - path: /opt/nfs-backup/create-snapshot.ps1
+    owner: root:root
+    permissions: '0640'
+    encoding: b64
+    content: ${snapshot_script_b64}
+  - path: /opt/nfs-backup/prepare-stage.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${stage_script_b64}
+  - path: /opt/nfs-backup/mount-nfs.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: ${mount_script_b64}
+runcmd:
+  - [bash, -lc, 'set -euo pipefail; curl -fsSL -o /tmp/packages-microsoft-prod.deb https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb; dpkg -i /tmp/packages-microsoft-prod.deb; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y aznfs powershell; pwsh -NoLogo -NoProfile -NonInteractive -Command "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force; Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; Install-Module -Name Az.Accounts,Az.Storage -Scope AllUsers -Force -AllowClobber"; mkdir -p /opt/azcopy; curl -fsSL https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tar.gz; tar -xzf /tmp/azcopy.tar.gz -C /opt/azcopy --strip-components=1; ln -sf /opt/azcopy/azcopy /usr/local/bin/azcopy; azcopy --version']

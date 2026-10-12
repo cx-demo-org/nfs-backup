@@ -1,0 +1,16 @@
+# Local Azure deployment state and generated plans can contain sensitive infrastructure details.
+.azure/
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/deploy-review.tfplan
+infra/deploy-resume.tfplan
+infra/destroy-review.tfplan
+infra/terraform.tfvars
+infra/$planPath
+
+# Local crash diagnostics and logs.
+**/crash.log
+**/crash.*.log
+*.log
