@@ -31,14 +31,19 @@ Azure Files share snapshots are the capture point; they are not an independent c
 
 The lab was deployed additively. It does not reuse or modify the existing source/target accounts named in the parent [SingtelNFS README](../README.md).
 
-## What the backup process does
+## Environment prerequisite: worker access to the NFS share
 
-1. Mount the source NFS share from the VM using AZNFS with NFSv4.1 and TLS. Network access is private-endpoint/VNet scoped; NFS uses network-level trust, not a per-user login.
-2. Create a **classic Azure Files share snapshot** through the Azure management plane using the worker's user-assigned managed identity and a lab-scoped custom role.
-3. Find the new read-only snapshot view under the mounted source share's `.snapshots` directory. Azure Files NFS snapshots need the share to have been mounted before the snapshot is created.
-4. Generate a source manifest, then create a POSIX pax-format tar archive on the attached staging disk. The archive uses numeric UID/GID and records POSIX modes, timestamps, symlinks, and hardlinks.
-5. Upload `backup.tar`, `manifest.json`, `run.json`, and then `_SUCCESS.json` to `nfs-backup-points/recovery-points/<run-id>/` using AzCopy and the worker's managed identity. Each run uses a unique prefix; the script does not overwrite an existing archive path.
-6. A separate restore operation downloads the archive, checks its SHA-256 against `run.json`, extracts into the empty restore NFS share, and compares manifests.
+The backup worker needs network access to the Azure Files NFS endpoint and a mounted NFSv4.1 view so it can read the share's `.snapshots` directory. In this lab, AZNFS provides TLS and the private endpoint/VNet provides network reachability. NFS uses network-level trust rather than per-user authentication. Azure Files exposes `.snapshots` as a virtual, read-only NFS view; it is not a normal directory that the backup script creates.
+
+This mount is **worker/environment setup, not the recurring backup operation**. The lab script calls an idempotent mount helper: if the source is already mounted in that worker's mount namespace, it reuses it; otherwise it establishes the mount. Azure requires that the share has been mounted before snapshots can be browsed. If a production backup worker is separate from the application VM or AKS pod, it needs its own NFS mount/access in its own host or pod context; an application's existing mount is not automatically shared with another VM or pod.
+
+## What each backup run does
+
+1. Create a **classic Azure Files share snapshot** through the Azure management plane using the worker's user-assigned managed identity and a lab-scoped custom role. Azure creates the point-in-time snapshot; the worker does not create snapshot data by making a directory.
+2. Use the snapshot timestamp to locate its new read-only virtual view under the worker's mounted source share `.snapshots` path, then read the snapshot contents from there.
+3. Generate a source manifest, then create a POSIX pax-format tar archive on the attached staging disk. The archive uses numeric UID/GID and records POSIX modes, timestamps, symlinks, and hardlinks.
+4. Upload `backup.tar`, `manifest.json`, `run.json`, and then `_SUCCESS.json` to `nfs-backup-points/recovery-points/<run-id>/` using AzCopy and the worker's managed identity. Each run uses a unique prefix; the script does not overwrite an existing archive path.
+5. A separate restore operation downloads the archive, checks its SHA-256 against `run.json`, extracts into the empty restore NFS share, and compares manifests.
 
 There is no direct Azure Files NFS-to-Blob server-side copy in this workflow. The local staging disk is necessary for this archive-based implementation. The target is a Blob archive, **not** a POSIX filesystem; metadata is recoverable by extracting the archive to a compatible filesystem, subject to the end-to-end test.
 
