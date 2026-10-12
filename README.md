@@ -31,31 +31,7 @@ Azure Files share snapshots are the capture point; they are not an independent c
 
 The lab was deployed additively. It does not reuse or modify the existing source/target accounts named in the parent [SingtelNFS README](../README.md).
 
-## Architecture
-
-```mermaid
-flowchart LR
-	subgraph LabVNet[Isolated lab VNet]
-		Worker[Ubuntu worker VM<br/>AZNFS + AzCopy + managed identity]
-		FilePE[Azure Files private endpoint]
-		BlobPE[Blob private endpoint]
-		DfsPE[DFS private endpoint]
-	end
-	Source[(Premium Azure Files NFS<br/>source share)]
-	Snapshot[(Azure Files share snapshot<br/>mounted through .snapshots)]
-	Stage[(128 GiB attached staging disk<br/>POSIX pax archive + manifest)]
-	Destination[(Separate HNS Blob account<br/>private container / recovery-points)]
-	Restore[(Azure Files NFS<br/>restore share)]
-	Worker --> FilePE --> Source
-	Source -. snapshot view .-> Snapshot
-	Snapshot --> Worker
-	Worker --> Stage
-	Stage --> BlobPE --> Destination
-	Destination --> DfsPE --> Worker
-	Worker --> FilePE --> Restore
-```
-
-### Backup flow
+## What the backup process does
 
 1. Mount the source NFS share from the VM using AZNFS with NFSv4.1 and TLS. Network access is private-endpoint/VNet scoped; NFS uses network-level trust, not a per-user login.
 2. Create a **classic Azure Files share snapshot** through the Azure management plane using the worker's user-assigned managed identity and a lab-scoped custom role.
@@ -117,7 +93,6 @@ Azure CLI calls from the workstation cannot enumerate destination blobs because 
 
 ## Related documentation
 
-- [Architecture decisions](architecture-options.md)
 - [Terraform resource layout and guardrails](infra/README.md)
 - [Backup, restore, deploy, and destroy operations](scripts/README.md)
 - [Functional and scale acceptance criteria](tests/README.md)
