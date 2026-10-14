@@ -1,101 +1,128 @@
-# Azure Files NFS Snapshot Backup Flow
+# Manual Azure Files NFS Snapshot Backup Flow
 
-This guide describes the manual equivalent of the lab's backup and restore scripts. Run the Linux/NFS and AzCopy commands on the **backup worker VM** from a privileged shell. Use a customer-approved identity and scope for any customer deployment; the values below are placeholders, not live account details.
+This is a **manual, command-by-command procedure** for a Linux backup worker. It does not invoke the lab automation scripts. Replace every `<placeholder>` with values for the environment. Do not paste subscription details, tokens, keys, or customer identifiers into a committed copy of this guide.
 
-## What happens
+The procedure creates an Azure Files NFS share snapshot, reads the snapshot through the mounted NFS `.snapshots` view, archives it locally, uploads the archive to a separate HNS-enabled Blob account, then demonstrates a restore. Azure does not copy an entire NFS share snapshot object into Blob; this flow copies the snapshot's files into a tar archive.
 
-1. A Linux worker mounts the configured Azure Files NFS share over the approved network.
-2. The worker asks Azure's management plane to create a point-in-time share snapshot.
-3. Azure exposes that read-only snapshot through the mounted share's virtual `.snapshots` directory.
-4. The worker reads the snapshot, creates a manifest, and packages the files as a POSIX pax tar archive on local staging storage.
-5. AzCopy uploads the archive and metadata to a unique path in a separate HNS-enabled Blob account.
-6. For a restore test, the worker downloads the archive, validates its digest, extracts it to a separate NFS share, and compares manifests.
+## Values used in the commands
 
-The snapshot itself stays with the source Azure Files share. It is not moved to Blob. Blob receives a separate archive copy. Since the archive is staged locally, the worker needs enough free disk for the archive plus working room.
+Have these values available from the customer's approved configuration:
 
-## 0. Set local values
+- Subscription ID, tenant, resource group, source storage account and NFS share.
+- Worker user-assigned managed identity client ID.
+- Destination HNS storage account and private container.
+- Linux NFS mount point, staging-disk mount point, and restore-share mount point.
 
-Replace all angle-bracket placeholders with values for the environment. Do not commit credentials, tokens, private keys, or customer identifiers in this file. The examples assume the lab paths; customer paths may differ.
+Example variable names are used below. Set them in the relevant shell before continuing. Use customer-selected values; these are not defaults to deploy blindly.
 
-On the worker, load its root-owned lab configuration if available:
+### Linux shell values
 
 ```bash
-sudo -i
-source /etc/nfs-backup/lab.env
-```
-
-The file defines values such as `SOURCE_ACCOUNT`, `SOURCE_SHARE`, `DESTINATION_ACCOUNT`, `BLOB_CONTAINER`, `SOURCE_MOUNT`, `RESTORE_MOUNT`, `STAGE_MOUNT`, `WORKER_CLIENT_ID`, and `SUBSCRIPTION_ID`.
-
-## 1. Prepare the staging disk and mount the source share
-
-Prepare and mount the dedicated staging disk. The helper checks for an existing filesystem before formatting, mounts it at the configured staging path, and restricts access to root:
-
-```bash
-/opt/nfs-backup/prepare-stage.sh
-df -h "$STAGE_MOUNT"
-```
-
-Mount the source NFS share through AZNFS. This is worker/environment setup; if already mounted in this worker's mount namespace, the helper reuses the mount:
-
-```bash
-/opt/nfs-backup/mount-nfs.sh source
-findmnt "$SOURCE_MOUNT"
-```
-
-The equivalent classic Azure Files NFS mount form is:
-
-```bash
-sudo mkdir -p /mnt/nfs-source
-sudo mount -t aznfs \
-  <storage-account>.file.core.windows.net:/<storage-account>/<share-name> \
-  /mnt/nfs-source \
-  -o vers=4,minorversion=1,sec=sys,nconnect=4
-```
-
-AZNFS provides TLS in transit. NFS access is network-scoped; it does not use a per-user Entra login. The worker needs connectivity to the configured private endpoint/VNet or another customer-approved network path. A mount on an application VM or AKS pod is not automatically shared with a separate backup worker.
-
-## 2. Create the Azure Files share snapshot
-
-Snapshots are created using the Azure management plane, not by creating a directory in NFS. For this lab, `create-snapshot.ps1` authenticates as the VM's user-assigned managed identity and calls `New-AzRmStorageShare`:
-
-```powershell
-Connect-AzAccount -Identity -AccountId $env:WORKER_CLIENT_ID
-Set-AzContext -SubscriptionId $env:SUBSCRIPTION_ID
-
-$snapshot = New-AzRmStorageShare `
-  -ResourceGroupName $env:RESOURCE_GROUP `
-  -StorageAccountName $env:SOURCE_ACCOUNT `
-  -Name $env:SOURCE_SHARE `
-  -Snapshot
-$snapshot.SnapshotTime
-```
-
-In a customer environment, grant the worker identity only the approved control-plane permission to create/list snapshots for the configured source account. Review the role definition with the customer's Azure administrator; the lab role is not automatically the right production role.
-
-## 3. Read the read-only snapshot view
-
-Azure exposes the snapshot as a virtual, read-only directory beneath the mounted share. It is not a normal folder that the worker creates. Convert the returned UTC snapshot time to the view name used by this lab, then inspect it:
-
-```bash
-SNAPSHOT_TIME='<timestamp returned by Azure, in UTC>'
-SNAPSHOT_NAME="$(date -u -d "$SNAPSHOT_TIME" +%Y%m%d%H%M%S)_snapshot"
-SNAPSHOT_PATH="$SOURCE_MOUNT/.snapshots/$SNAPSHOT_NAME"
-ls -la "$SNAPSHOT_PATH"
-```
-
-Example shape only: `.snapshots/YYYYMMDDhhmmss_snapshot/`. Use the actual snapshot time returned by Azure, not a copied example. Read data from this path rather than the live share root so writes made after snapshot time are not included.
-
-## 4. Create the manifest and archive on staging storage
-
-Create a unique recovery-point folder. Never reuse a run ID that already has an archive:
-
-```bash
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN_DIR="$STAGE_MOUNT/recovery-points/$RUN_ID"
+export SUBSCRIPTION_ID='<subscription-id>'
+export RESOURCE_GROUP='<resource-group>'
+export SOURCE_ACCOUNT='<source-storage-account>'
+export SOURCE_SHARE='<source-nfs-share>'
+export RESTORE_SHARE='<empty-restore-nfs-share>'
+export DESTINATION_ACCOUNT='<hns-destination-storage-account>'
+export BLOB_CONTAINER='<private-container>'
+export WORKER_CLIENT_ID='<worker-managed-identity-client-id>'
+export SOURCE_MOUNT='/mnt/nfs-source'
+export RESTORE_MOUNT='/mnt/nfs-restore'
+export STAGE_MOUNT='/mnt/nfs-stage'
+export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export RUN_DIR="$STAGE_MOUNT/recovery-points/$RUN_ID"
 mkdir -p "$RUN_DIR"
 ```
 
-Create the manifest and archive:
+Keep the run ID unique. Do not reuse a recovery-point folder that already contains an archive.
+
+## 1. Prepare local staging storage
+
+Inspect the worker's block devices and filesystems before mounting. Do not format a disk unless you have verified it is the dedicated, disposable, empty staging disk; formatting destroys existing contents.
+
+```bash
+lsblk -f
+sudo mkdir -p "$STAGE_MOUNT"
+```
+
+If the approved staging disk already has a filesystem, mount that filesystem. Example only—the device and filesystem UUID must be verified for the worker:
+
+```bash
+sudo mount /dev/disk/azure/scsi1/lun0 "$STAGE_MOUNT"
+df -h "$STAGE_MOUNT"
+```
+
+Ensure the staging disk has enough free space for the archive plus working headroom. This procedure stages a full archive locally; it is not incremental.
+
+## 2. Mount the source NFS share
+
+The worker needs private network connectivity to the Azure Files NFS endpoint. NFS uses network-level access rather than per-user Entra authentication. For TLS in transit, install/use Microsoft's AZNFS mount helper.
+
+```bash
+sudo mkdir -p "$SOURCE_MOUNT"
+sudo mount -t aznfs \
+  "${SOURCE_ACCOUNT}.file.core.windows.net:/${SOURCE_ACCOUNT}/${SOURCE_SHARE}" \
+  "$SOURCE_MOUNT" \
+  -o vers=4,minorversion=1,sec=sys,nconnect=4
+findmnt "$SOURCE_MOUNT"
+```
+
+Mount the share at least once before creating snapshots. Azure Files exposes snapshots through a virtual, read-only `.snapshots` view beneath this mount. Mounting is worker setup; it is not itself the snapshot or backup operation.
+
+## 3. Authenticate to Azure and create the snapshot
+
+The snapshot is created through the Azure management plane, not by creating a directory in NFS. Use the worker's user-assigned managed identity and a customer-approved least-privilege role that permits snapshot management on the configured source account.
+
+In PowerShell on the Linux worker:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$subscriptionId = '<subscription-id>'
+$resourceGroup = '<resource-group>'
+$sourceAccount = '<source-storage-account>'
+$sourceShare = '<source-nfs-share>'
+$workerClientId = '<worker-managed-identity-client-id>'
+
+Import-Module Az.Accounts
+Import-Module Az.Storage
+Connect-AzAccount -Identity -AccountId $workerClientId
+Set-AzContext -SubscriptionId $subscriptionId
+
+$snapshot = New-AzRmStorageShare `
+  -ResourceGroupName $resourceGroup `
+  -StorageAccountName $sourceAccount `
+  -Name $sourceShare `
+  -Snapshot `
+  -ErrorAction Stop
+$snapshotTime = ([DateTime]$snapshot.SnapshotTime).ToUniversalTime().ToString('o')
+$snapshotTime
+```
+
+Record the returned UTC `SnapshotTime`. It identifies the point-in-time snapshot to read. If the cmdlet fails, stop; do not assume a snapshot was created.
+
+## 4. Locate and inspect that snapshot
+
+In Bash, set the timestamp to the exact value returned by PowerShell. The classic Azure Files NFS snapshot view name is derived from that timestamp:
+
+```bash
+SNAPSHOT_TIME='<UTC SnapshotTime returned above>'
+SNAPSHOT_NAME="$(date -u -d "$SNAPSHOT_TIME" +%Y%m%d%H%M%S)_snapshot"
+SNAPSHOT_PATH="$SOURCE_MOUNT/.snapshots/$SNAPSHOT_NAME"
+
+# Wait briefly for the read-only virtual view to appear, then fail if it is not visible.
+for attempt in $(seq 1 36); do
+  if [[ -d "$SNAPSHOT_PATH" ]]; then break; fi
+  sleep 5
+done
+test -d "$SNAPSHOT_PATH"
+ls -la "$SNAPSHOT_PATH"
+```
+
+Read from `SNAPSHOT_PATH`, not from the live share root. The `.snapshots` entry is provided by Azure Files; it is not a user-created folder.
+
+## 5. Build a manifest and POSIX archive
+
+The manifest records paths, file types, sizes, SHA-256 per-file hashes, numeric UID/GID, POSIX mode bits, modification times, symlink targets, and hardlink relationships. The manifest tool is provided as a standalone Python file in this repository; copy it to the worker or install it at `/opt/nfs-backup/manifest.py` before using these commands.
 
 ```bash
 python3 /opt/nfs-backup/manifest.py create \
@@ -106,23 +133,32 @@ tar --format=pax --create \
   --file "$RUN_DIR/backup.tar" \
   --directory "$SNAPSHOT_PATH" \
   --numeric-owner --sparse .
-```
 
-The manifest records relative paths, file types, sizes, SHA-256 content hashes, numeric UID/GID, POSIX mode bits, timestamps, symlink targets, and hardlink relationships. The pax tar carries the tree for restore; Blob itself is object storage and does not become an NFS filesystem.
-
-Record the archive size and whole-archive SHA-256:
-
-```bash
 ARCHIVE_SHA256="$(sha256sum "$RUN_DIR/backup.tar" | awk '{print $1}')"
 ARCHIVE_BYTES="$(stat -c '%s' "$RUN_DIR/backup.tar")"
-printf 'bytes=%s sha256=%s\n' "$ARCHIVE_BYTES" "$ARCHIVE_SHA256"
+printf 'ARCHIVE_BYTES=%s\nARCHIVE_SHA256=%s\n' "$ARCHIVE_BYTES" "$ARCHIVE_SHA256"
 ```
 
-The automated flow also writes `run.json` containing run ID, source share, snapshot time/name, archive size, and SHA-256. Keep the manifest and run metadata beside the archive.
+`pax` format stores extended metadata such as high-resolution timestamps. `--numeric-owner` records numeric IDs instead of local username strings. A tar archive can carry POSIX ownership, permissions, timestamps, and links; Blob objects themselves are not a POSIX filesystem.
 
-## 5. Upload the recovery point to Blob
+Write a run metadata file beside the archive. The values below are shell variables established earlier:
 
-Authenticate AzCopy with the worker's managed identity, then upload to a unique recovery-point prefix on the destination DFS endpoint:
+```bash
+jq -n \
+  --arg run_id "$RUN_ID" \
+  --arg snapshot_time "$SNAPSHOT_TIME" \
+  --arg snapshot_name "$SNAPSHOT_NAME" \
+  --arg source_account "$SOURCE_ACCOUNT" \
+  --arg source_share "$SOURCE_SHARE" \
+  --arg archive_sha256 "$ARCHIVE_SHA256" \
+  --arg archive_bytes "$ARCHIVE_BYTES" \
+  '{schema_version:1,run_id:$run_id,snapshot:{name:$snapshot_name,created_at_utc:$snapshot_time},source:{storage_account:$source_account,share:$source_share},archive:{file:"backup.tar",bytes:($archive_bytes|tonumber),sha256:$archive_sha256},created_at_utc:(now|todate)}' \
+  > "$RUN_DIR/run.json"
+```
+
+## 6. Upload archive and metadata to private Blob
+
+The worker identity needs Blob data-plane write permissions on the destination container/account. Authenticate AzCopy with that identity; do not use account keys or long-lived SAS tokens.
 
 ```bash
 azcopy login --identity --identity-client-id "$WORKER_CLIENT_ID"
@@ -134,7 +170,7 @@ for artifact in backup.tar manifest.json run.json; do
 done
 ```
 
-Only after all three uploads succeed, write and upload a completion marker:
+After all three uploads return successfully, publish a completion marker:
 
 ```bash
 printf '{"run_id":"%s","status":"uploaded","archive_sha256":"%s"}\n' \
@@ -143,24 +179,33 @@ azcopy copy "$RUN_DIR/_SUCCESS.json" "$REMOTE_DIR/_SUCCESS.json" \
   --from-to=LocalBlobFS --overwrite=false --put-md5
 ```
 
-`_SUCCESS.json` means the upload commands completed. It does **not** prove the archive is restorable; restore verification is a separate test. Avoid keys and SAS tokens; destination writes use Blob RBAC for the worker identity.
+The marker means the upload commands completed; it does not prove recoverability. Restore verification below is the test of the recovery point. The container path includes the unique run ID so one backup run cannot overwrite another's files.
 
-## 6. Download, restore, and compare
+## 7. Download, restore, and verify
 
-Mount the separate, empty restore NFS share and download the artifacts for the selected run:
+Mount the separate, empty restore NFS share in the worker's NFS context:
 
 ```bash
-/opt/nfs-backup/mount-nfs.sh restore
+sudo mkdir -p "$RESTORE_MOUNT"
+sudo mount -t aznfs \
+  "${SOURCE_ACCOUNT}.file.core.windows.net:/${SOURCE_ACCOUNT}/${RESTORE_SHARE}" \
+  "$RESTORE_MOUNT" \
+  -o vers=4,minorversion=1,sec=sys,nconnect=4
+findmnt "$RESTORE_MOUNT"
+```
+
+Create a local restore workspace, then download the recovery-point artifacts:
+
+```bash
 RESTORE_DIR="$STAGE_MOUNT/restore-test/$RUN_ID"
 mkdir -p "$RESTORE_DIR"
 
-azcopy copy "$REMOTE_DIR/_SUCCESS.json" "$RESTORE_DIR/_SUCCESS.json" --from-to=BlobFSLocal
-azcopy copy "$REMOTE_DIR/backup.tar" "$RESTORE_DIR/backup.tar" --from-to=BlobFSLocal
-azcopy copy "$REMOTE_DIR/manifest.json" "$RESTORE_DIR/manifest.json" --from-to=BlobFSLocal
-azcopy copy "$REMOTE_DIR/run.json" "$RESTORE_DIR/run.json" --from-to=BlobFSLocal
+for artifact in _SUCCESS.json backup.tar manifest.json run.json; do
+  azcopy copy "$REMOTE_DIR/$artifact" "$RESTORE_DIR/$artifact" --from-to=BlobFSLocal
+done
 ```
 
-Verify the downloaded archive before extracting it:
+Verify the archive's SHA-256 against the metadata before extracting:
 
 ```bash
 EXPECTED_SHA256="$(jq -r '.archive.sha256' "$RESTORE_DIR/run.json")"
@@ -168,7 +213,7 @@ ACTUAL_SHA256="$(sha256sum "$RESTORE_DIR/backup.tar" | awk '{print $1}')"
 test "$EXPECTED_SHA256" = "$ACTUAL_SHA256"
 ```
 
-Extract to the empty restore share and compare its manifest with the snapshot manifest:
+Extract into the empty restore share and compare its manifest to the snapshot manifest:
 
 ```bash
 sudo tar --extract \
@@ -184,13 +229,12 @@ python3 /opt/nfs-backup/manifest.py compare \
   --actual "$RESTORE_DIR/restored-manifest.json"
 ```
 
-A passing result prints `MANIFEST_COMPARE=PASS`. This checks file content and the metadata fields recorded by the manifest; it is the restore test, not merely a successful upload.
+Success is reported as `MANIFEST_COMPARE=PASS`; investigate any missing/extra paths, content hashes, or metadata differences rather than treating an upload marker as proof of a good backup.
 
-## Scope and caveats
+## Important limits
 
-- This process is for the lab's **classic `Microsoft.Storage` Azure Files NFS share**. Confirm the resource provider, mount behavior, and snapshot support before adapting it to another share type.
-- The 10-GiB test was successful. The archive process reads the snapshot to build a manifest and again to build the tar, so large or metadata-heavy trees can take longer than expected.
-- This is a full archive for each recovery point, not incremental backup. Stage-disk capacity must exceed the archive size with headroom.
-- The tar contains POSIX attributes, but restore fidelity depends on the destination NFS filesystem and privileges; verify with the manifest and application-level checks.
-- Share snapshots remain in the source account. The Blob copy is separate. Blob lifecycle expiration is not WORM protection.
-- Do not delete source snapshots or local evidence until the corresponding Blob archive has been downloaded and successfully restored in a test.
+- This example applies to classic `Microsoft.Storage` Azure Files NFS shares; validate support before adapting it to another share resource provider.
+- The whole NFS snapshot cannot be moved to Blob as a snapshot object. The worker reads files and packages them into an archive.
+- The workflow makes a full archive each run, not an incremental backup. The staging disk must fit the archive with headroom.
+- Azure Files snapshots remain in the source account. The Blob archive is the separate copy. A 30-day Blob lifecycle rule is not WORM protection.
+- For active databases, coordinate application quiescence if a crash-consistent point-in-time copy is insufficient.
