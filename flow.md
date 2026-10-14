@@ -1,30 +1,46 @@
 # Manual Azure Files NFS Snapshot Backup Flow
 
-This is a **manual, command-by-command procedure** for a Linux backup worker. It does not invoke the lab automation scripts. Replace every `<placeholder>` with values for the environment. Do not paste subscription details, tokens, keys, or customer identifiers into a committed copy of this guide.
+This is a **manual, command-by-command procedure** for a Linux backup worker. It does not invoke the lab automation scripts. The resource names below are for the existing disposable lab; subscription, tenant, and managed-identity client IDs remain local placeholders. Do not add credentials, tokens, or private keys to this guide.
 
 The procedure creates an Azure Files NFS share snapshot, reads the snapshot through the mounted NFS `.snapshots` view, archives it locally, uploads the archive to a separate HNS-enabled Blob account, then demonstrates a restore. Azure does not copy an entire NFS share snapshot object into Blob; this flow copies the snapshot's files into a tar archive.
 
 ## Values used in the commands
 
-Have these values available from the customer's approved configuration:
+### Existing disposable lab resources
 
-- Subscription ID, tenant, resource group, source storage account and NFS share.
+| Resource | Value |
+|---|---|
+| Resource group | `rg-nfsbackup-lab-sea-001` |
+| Region | `southeastasia` |
+| Source storage account | `stnfsbksrcb47c219e` |
+| Source NFS share | `nfsbackup-lab` |
+| Restore NFS share | `nfsbackup-restore` |
+| Destination HNS storage account | `stnfsbkdstb47c219e` |
+| Destination container | `nfs-backup-points` |
+| Worker VM | `vm-nfsbackup-worker-sea-001` |
+| Source mount path | `/mnt/nfs-source` |
+| Staging mount path | `/mnt/nfs-stage` |
+| Restore mount path | `/mnt/nfs-restore` |
+
+### Values supplied locally
+
+Get these from your authorized local configuration; they are deliberately not published here:
+
+- Subscription ID and tenant ID.
 - Worker user-assigned managed identity client ID.
-- Destination HNS storage account and private container.
-- Linux NFS mount point, staging-disk mount point, and restore-share mount point.
 
-Example variable names are used below. Set them in the relevant shell before continuing. Use customer-selected values; these are not defaults to deploy blindly.
+Set the values in the relevant shell before continuing. For another environment, replace the lab-specific names above with customer-approved values.
 
 ### Linux shell values
 
 ```bash
 export SUBSCRIPTION_ID='<subscription-id>'
-export RESOURCE_GROUP='<resource-group>'
-export SOURCE_ACCOUNT='<source-storage-account>'
-export SOURCE_SHARE='<source-nfs-share>'
-export RESTORE_SHARE='<empty-restore-nfs-share>'
-export DESTINATION_ACCOUNT='<hns-destination-storage-account>'
-export BLOB_CONTAINER='<private-container>'
+export RESOURCE_GROUP='rg-nfsbackup-lab-sea-001'
+export SOURCE_ACCOUNT='stnfsbksrcb47c219e'
+export SOURCE_SHARE='nfsbackup-lab'
+export RESTORE_SHARE='nfsbackup-restore'
+export DESTINATION_ACCOUNT='stnfsbkdstb47c219e'
+export BLOB_CONTAINER='nfs-backup-points'
 export WORKER_CLIENT_ID='<worker-managed-identity-client-id>'
 export SOURCE_MOUNT='/mnt/nfs-source'
 export RESTORE_MOUNT='/mnt/nfs-restore'
@@ -78,9 +94,9 @@ In PowerShell on the Linux worker:
 ```powershell
 $ErrorActionPreference = 'Stop'
 $subscriptionId = '<subscription-id>'
-$resourceGroup = '<resource-group>'
-$sourceAccount = '<source-storage-account>'
-$sourceShare = '<source-nfs-share>'
+$resourceGroup = 'rg-nfsbackup-lab-sea-001'
+$sourceAccount = 'stnfsbksrcb47c219e'
+$sourceShare = 'nfsbackup-lab'
 $workerClientId = '<worker-managed-identity-client-id>'
 
 Import-Module Az.Accounts
