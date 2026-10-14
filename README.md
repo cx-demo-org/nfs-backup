@@ -75,6 +75,7 @@ Azure CLI calls from the workstation cannot enumerate destination blobs because 
 
 ## Related documentation
 
+- [Manual snapshot, archive, upload, and restore commands](flow.md)
 - [Terraform resource layout and guardrails](infra/README.md)
 - [Backup, restore, deploy, and destroy operations](scripts/README.md)
 - [Functional and scale acceptance criteria](tests/README.md)
