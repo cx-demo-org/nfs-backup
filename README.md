@@ -17,11 +17,10 @@ This mount is **worker/environment setup, not the recurring backup operation**. 
 
 ## What each backup run does
 
-1. Create a **classic Azure Files share snapshot of the configured source share** through the Azure management plane. In a customer deployment, this is the customer's existing share; the backup solution does not recreate or modify the share's live file contents. The worker authenticates with its user-assigned managed identity, which must be granted customer-approved least-privilege permissions to create/list snapshots on that source account. Azure creates the point-in-time snapshot; the worker does not create snapshot data by making a directory. The lab's custom role is only a test implementation of that permission boundary.
-2. Use the snapshot timestamp to locate its new read-only virtual view under the worker's mounted source share `.snapshots` path, then read the snapshot contents from there.
-3. Generate a source manifest, then create a POSIX pax-format tar archive on the attached staging disk. The archive uses numeric UID/GID and records POSIX modes, timestamps, symlinks, and hardlinks.
-4. Upload `backup.tar`, `manifest.json`, `run.json`, and then `_SUCCESS.json` to `nfs-backup-points/recovery-points/<run-id>/` using AzCopy and the worker's managed identity. Each run uses a unique prefix; the script does not overwrite an existing archive path.
-5. A separate restore operation downloads the archive, checks its SHA-256 against `run.json`, extracts into the empty restore NFS share, and compares manifests.
+1. Create a point-in-time snapshot of the configured Azure Files NFS share using the worker's managed identity.
+2. Read the snapshot from the mounted share's read-only `.snapshots` view and create a POSIX-aware archive and manifest on staging disk.
+3. Upload the archive and metadata to a unique recovery-point folder in private Blob storage using managed identity.
+4. To test recovery, download the archive, verify its SHA-256, restore it to an empty NFS share, and compare manifests.
 
 There is no direct Azure Files NFS-to-Blob server-side copy in this workflow. The local staging disk is necessary for this archive-based implementation. The target is a Blob archive, **not** a POSIX filesystem; metadata is recoverable by extracting the archive to a compatible filesystem, subject to the end-to-end test.
 
