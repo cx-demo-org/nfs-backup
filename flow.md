@@ -122,6 +122,8 @@ Read from `SNAPSHOT_PATH`, not from the live share root. The `.snapshots` entry 
 
 ## 5. Build a manifest and POSIX archive
 
+> **Important — manifest is verification tooling, not the backup itself.** The backup payload is `backup.tar`. Creating a manifest before the archive is an optional pre-backup inventory/checkpoint; the manifest is useful only if it is kept with the archive and later compared after restore. If you omit the manifest commands, tar creation and upload still produce a data backup, but you lose this automated file-by-file verification.
+
 The manifest records paths, file types, sizes, SHA-256 per-file hashes, numeric UID/GID, POSIX mode bits, modification times, symlink targets, and hardlink relationships. The manifest tool is provided as a standalone Python file in this repository; copy it to the worker or install it at `/opt/nfs-backup/manifest.py` before using these commands.
 
 ```bash
@@ -141,7 +143,7 @@ printf 'ARCHIVE_BYTES=%s\nARCHIVE_SHA256=%s\n' "$ARCHIVE_BYTES" "$ARCHIVE_SHA256
 
 `pax` format stores extended metadata such as high-resolution timestamps. `--numeric-owner` records numeric IDs instead of local username strings. A tar archive can carry POSIX ownership, permissions, timestamps, and links; Blob objects themselves are not a POSIX filesystem.
 
-Write a run metadata file beside the archive. The values below are shell variables established earlier:
+Write a run metadata file beside the archive. It records the snapshot and archive checksum; it is sidecar metadata, not part of the file data. The values below are shell variables established earlier:
 
 ```bash
 jq -n \
@@ -228,6 +230,8 @@ python3 /opt/nfs-backup/manifest.py compare \
   --expected "$RESTORE_DIR/manifest.json" \
   --actual "$RESTORE_DIR/restored-manifest.json"
 ```
+
+> **Important — restore comparison is post-backup validation.** The manifest comparison runs only after downloading and restoring the archive. It is not required to create or upload the backup; it is the test that checks whether the backup can be recovered with matching paths, file content, and recorded metadata. `_SUCCESS.json` only indicates the upload commands completed and must not be treated as proof of a valid restore.
 
 Success is reported as `MANIFEST_COMPARE=PASS`; investigate any missing/extra paths, content hashes, or metadata differences rather than treating an upload marker as proof of a good backup.
 
